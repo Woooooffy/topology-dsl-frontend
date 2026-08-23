@@ -9,12 +9,16 @@
 // Rail-optimized: leaf l attaches to GPU l of every node, so each of the 8
 // GPUs in a node lands on a distinct leaf (rail).
 
+// Latency is a uniform 700 ns on every link. The Python classes these files port give
+// intra-host links a shorter alpha (0.35 us), but no result here turns on it -- the
+// binding constraints are all capacity cuts -- so the files keep one value throughout.
 // One node: 8 GPUs fully served by a single NVSwitch at 1800 GBps per GPU.
+
 module server() {
     node nvsw type=nvswitch;
     for g in (0, 7) {
         node gpu{g} type=gpu;
-        link gpu{g} nvsw bandwidth=1800[GBps] latency=100[ns];
+        link gpu{g} nvsw bandwidth=1800[GBps] latency=700[ns];
     }
 }
 
@@ -22,7 +26,7 @@ module main() {
     rdma L2AckInterval=0 L2ChunkSize=4000 Mtu=4096 CcMode=12;
     // 32 nodes.
     for s in (0, 31) {
-        use server() as srv{s};
+        use server() as srv{s} cell;
     }
 
     // 8 leaf switches, 4 spine switches.

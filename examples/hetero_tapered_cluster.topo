@@ -10,12 +10,16 @@
 // Heterogeneous BW: A/C host uplinks 100 GBps, B's lone uplink 50 GBps,
 // top0 <-> top1 top mesh 200 GBps.
 
+// Latency is a uniform 700 ns on every link. The Python classes these files port give
+// intra-host links a shorter alpha (0.35 us), but no result here turns on it -- the
+// binding constraints are all capacity cuts -- so the files keep one value throughout.
 // One host: N GPUs fully served by a single NVSwitch at 1800 GBps per GPU.
+
 module server(N) {
     node nvsw type=nvswitch;
     for g in (0, {N}-1) {
         node gpu{g} type=gpu;
-        link gpu{g} nvsw bandwidth=1800[GBps] latency=100[ns];
+        link gpu{g} nvsw bandwidth=1800[GBps] latency=700[ns];
     }
 }
 
@@ -23,9 +27,9 @@ module main() {
     rdma L2AckInterval=0 L2ChunkSize=4000 Mtu=4096 CcMode=12;
 
     // 3 heterogeneous hosts.
-    use server(4) as hostA;
-    use server(4) as hostB;
-    use server(6) as hostC;
+    use server(4) as hostA cell;
+    use server(4) as hostB cell;
+    use server(6) as hostC cell;
 
     // 2 top switches forming the top mesh.
     node top0 type=switch;

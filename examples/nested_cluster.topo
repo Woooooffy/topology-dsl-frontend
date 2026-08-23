@@ -1,0 +1,50 @@
+// THREE-level topology: cluster -> racks -> hosts (port of TE-CCL's NestedCluster).
+// The point of it is the DEPTH: every other example here is two levels (a network of hosts,
+// each host an NVSwitch), so a consumer's recursion never has to recurse. Here it does.
+//
+//   top switch  ---- 3 racks
+//     rack r    = rack switch + 3 hosts
+//     host h    = NVSwitch + 2 GPUs
+//
+// GPU 0 of each host uplinks to its rack switch; GPU 0 of host 0 in each rack uplinks to the
+// top switch. Everything else reaches the outside world through a relay -- one uplink per host
+// and one per rack means most data cannot leave where it lives, which is what forces real
+// staging at both interior levels instead of letting a symmetric topology hide it.
+//
+// Bandwidths are tiered so each level is genuinely faster than the one above it (400 / 100 /
+// 25 GBps), which is the premise a hierarchical schedule rests on: the inner fabric hides under
+// the outer. Latency is a uniform 700 ns; this topology measures structure, not propagation
+// (the class it ports uses 0, and the three-level solve is identical either way).
+//
+// Both `use` levels are marked `cell`, so a hierarchical consumer sees racks whose subcells are
+// hosts. A backend without a notion of hierarchy (ns-3) ignores the marker and builds the same
+// 30-node graph.
+
+// One host: 2 GPUs on one NVSwitch.
+module host() {
+    node nvsw type=nvswitch;
+    for g in (0, 1) {
+        node gpu{g} type=gpu;
+        link gpu{g} nvsw bandwidth=400[GBps] latency=700[ns];
+    }
+}
+
+// One rack: a rack switch and 3 hosts, each reaching it through its GPU 0 alone.
+module rack() {
+    node sw type=switch;
+    for h in (0, 2) {
+        use host() as host{h} cell;
+        link host{h}.gpu0 sw bandwidth=100[GBps] latency=700[ns];
+    }
+}
+
+module main() {
+    for r in (0, 2) {
+        use rack() as rack{r} cell;
+    }
+    node top type=switch;
+    // One uplink per rack, owned by host 0's gateway GPU. Same forcing, one level up.
+    for r in (0, 2) {
+        link rack{r}.host0.gpu0 top bandwidth=25[GBps] latency=700[ns];
+    }
+}

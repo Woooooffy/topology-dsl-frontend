@@ -21,7 +21,9 @@
 //   LEAF_SPINE_BW = (50, 25)     deliberately UNEQUAL, per spine
 //   LEAF_SPINE_PORTS = (2, 1)    spine0's 50 = 2 x 25 cables, spine1's 25 = 1 cable
 // Every port in the fabric is therefore 25 GBps, and each leaf still has 75 GB/s of uplink.
-// Latencies: NVLINK_ALPHA = 0.35us = 350ns, NETWORK_ALPHA = 0.7us = 700ns.
+// Latency is a uniform 700 ns on every link. The Python classes these files port give
+// intra-host links a shorter alpha (0.35 us), but no result here turns on it -- the
+// binding constraints are all capacity cuts -- so the files keep one value throughout.
 //
 // PORT BUDGET (SWITCH_RADIX = 8), matching TwoPodRailHostBound's docstring table. TE-CCL
 // numbers a switch's ports positionally over its neighbors in ascending node index, then
@@ -44,7 +46,7 @@ module server() {
     node nvsw type=nvswitch;
     for g in (0, 1) {
         node gpu{g} type=gpu;
-        link gpu{g} nvsw bandwidth=900[GBps] latency=350[ns];
+        link gpu{g} nvsw bandwidth=900[GBps] latency=700[ns];
     }
 }
 
@@ -53,7 +55,7 @@ module main() {
 
     // 8 nodes: srv0-srv3 in pod A, srv4-srv7 in pod B.
     for s in (0, 7) {
-        use server() as srv{s};
+        use server() as srv{s} cell;
     }
 
     // 4 leaf switches (pod x rail), 2 spine switches.

@@ -132,6 +132,17 @@ class NewLinkInsn(Insn):
 	def __repr__(self) -> str:
 		return f"NewLinkInsn(src {self.src}, dst {self.dst}, attrs {self.attrs})"
 
+class SymmetryInsn(Insn):
+	def __init__(self, refs: list[list[str]]):
+		# each entry is a dotted reference, in the same part-list form NewLinkInsn uses
+		self.refs: list[list[str]] = refs
+
+	def __repr__(self) -> str:
+		return f"SymmetryInsn({self.refs})"
+
+	def simple_print(self) -> str:
+		return f"SymmetryInsn({len(self.refs)} nodes) "
+
 class RdmaConfigInsn(Insn):
 	def __init__(self, attrs: dict[str, Any]):
 		self.attrs: dict[str, Any] = attrs
@@ -143,13 +154,17 @@ class RdmaConfigInsn(Insn):
 		return __repr__(self) + " "
 
 class SubmoduleInsn(Insn):
-	def __init__(self, name: str, submodule_name: str, *args: Any):
+	def __init__(self, name: str, submodule_name: str, *args: Any, is_cell: bool = False):
 		self.name: str = name
 		self.module_name: str = submodule_name
 		self.args: Any = args
+		# `use ... as name cell;` -- this instance is a HIERARCHY CELL (see the grammar). Purely
+		# structural: a backend that does not model hierarchy ignores it.
+		self.is_cell: bool = is_cell
 
 	def __repr__(self) -> str:
-		return f"SubmoduleInsn({self.name, self.module_name}, args{self.args})"
+		cell = ", cell" if self.is_cell else ""
+		return f"SubmoduleInsn({self.name, self.module_name}, args{self.args}{cell})"
 	
 	def simple_print(self) -> str:
 		return __repr__(self) + " "
@@ -233,6 +248,9 @@ class TopoTransformer(Transformer):
 		attrs = dict(items[2:])
 		return NewLinkInsn(src_name, dst_name, **attrs)
 
+	def sym_stmt(self, items) -> Insn:
+		return SymmetryInsn([item for item in items])
+
 	def rdma_stmt(self, items) -> Insn:
 		return RdmaConfigInsn(dict(items))
 
@@ -240,9 +258,15 @@ class TopoTransformer(Transformer):
 		submodule_name = items[0]
 		args = items[1]
 		name = items[2]
+		# items[3] is the optional `cell` marker: None when absent (lark fills an omitted [rule]
+		# with a placeholder), True when present -- see cell_marker below.
+		is_cell = len(items) > 3 and items[3] is not None
 		if args is None:
 			args = []
-		return SubmoduleInsn(name, submodule_name, *args)
+		return SubmoduleInsn(name, submodule_name, *args, is_cell=is_cell)
+
+	def cell_marker(self, items) -> bool:
+		return True
 	
 	def for_stmt(self, items) -> Insn:	
 		iter_name = items[0]

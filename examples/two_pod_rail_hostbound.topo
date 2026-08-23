@@ -11,7 +11,9 @@
 //   NVLINK_BW     = 900          GPU <-> its NVSwitch
 //   GPU_LEAF_BW   = 25           <- the host-bound knob (TwoPodRailHostBound.GPU_LEAF_BW)
 //   LEAF_SPINE_BW = (50, 25)     deliberately UNEQUAL, per spine
-// Latencies: NVLINK_ALPHA = 0.35us = 350ns, NETWORK_ALPHA = 0.7us = 700ns.
+// Latency is a uniform 700 ns on every link. The Python classes these files port give
+// intra-host links a shorter alpha (0.35 us), but no result here turns on it -- the
+// binding constraints are all capacity cuts -- so the files keep one value throughout.
 //
 // Host-bound means the GPU->leaf link is the binding cut, and both streams on it are
 // pinned with zero slack, so a rate-oblivious emitter cannot hide in headroom.
@@ -21,7 +23,7 @@ module server() {
     node nvsw type=nvswitch;
     for g in (0, 1) {
         node gpu{g} type=gpu;
-        link gpu{g} nvsw bandwidth=900[GBps] latency=350[ns];
+        link gpu{g} nvsw bandwidth=900[GBps] latency=700[ns];
     }
 }
 
@@ -30,7 +32,7 @@ module main() {
 
     // 8 nodes: srv0-srv3 in pod A, srv4-srv7 in pod B.
     for s in (0, 7) {
-        use server() as srv{s};
+        use server() as srv{s} cell;
     }
 
     // 4 leaf switches (pod x rail), 2 spine switches.

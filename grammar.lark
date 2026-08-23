@@ -9,6 +9,7 @@ stmt:  node_stmt ";"
     | link_stmt ";"
     | use_stmt ";"
     | rdma_stmt ";"
+    | sym_stmt ";"
     | for_stmt
 		| if_stmt
 
@@ -20,6 +21,13 @@ name: NAME template_suffix?
 template_suffix: var | "{" NUMBER "}"
 
 
+// ----------------- SYMMETRY -----------------
+// "symmetric spine0 spine1;" declares the listed nodes INTERCHANGEABLE: swapping them maps the
+// topology onto itself. It states an intent the graph alone cannot -- two nodes can look alike
+// by accident -- and a consumer that exploits symmetry (a solver breaking a degenerate tie) uses
+// it; one that does not (ns-3) ignores it. It adds no node and no link.
+sym_stmt: "symmetric" ref ref+
+
 // ----------------- LINK -----------------
 link_stmt: "link" ref ref (attr)*
 
@@ -28,7 +36,12 @@ ref: name ("." name)*
 
 
 // ----------------- USE -----------------
-use_stmt: "use" name "(" [args] ")" "as" name
+// The optional `cell` marker declares this instance a HIERARCHY CELL: the group of nodes that a
+// hierarchical consumer collapses into one coarse node (a host, a rack). It is pure structure --
+// it adds no node, link or attribute -- so a backend with no notion of hierarchy (ns-3) ignores
+// it. Markers nest: a marked instance inside a marked instance is the outer one's subcell.
+use_stmt: "use" name "(" [args] ")" "as" name [cell_marker]
+cell_marker: "cell"
 
 
 // ----------------- RDMA CONFIG -----------------

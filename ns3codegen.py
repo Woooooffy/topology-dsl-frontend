@@ -71,12 +71,73 @@ class NS3BuildRdmaFabric(NS3Insn):
 	def __repr__(self) -> str:
 		return f"Build RDMA fabric"
 
+class NodeRecord():
+	'''
+	One declared node, with everything the DSL said about it.
+
+	The NS3Make* instructions carry only per-type COUNTS, which is all an ns-3 emitter needs
+	(it creates a NodeContainer and indexes into it). Anything else -- a consumer that wants a
+	node's radix, or which module instance it belongs to -- has nowhere to read that from, so
+	the flattening keeps one record per node alongside the counts. Purely additive: the counts
+	and the name->index dicts are unchanged.
+	'''
+	def __init__(self, name: str, type: str, index: int, attrs: dict[str, Any],
+	             scope: tuple[str, ...]):
+		# fully-qualified name, exactly as NS3InstallLink spells its endpoints
+		self.name: str = name
+		self.type: str = type          # "gpu" | "switch" | "nvswitch"
+		self.index: int = index        # index WITHIN its type, i.e. its NodeContainer slot
+		# every attr the node was declared with, `type` included, with expressions resolved
+		self.attrs: dict[str, Any] = attrs
+		# the module instance this node was declared in, as the chain of instance names from
+		# main downward: ("srv0",) for a node inside `use server() as srv0`, () at top level.
+		# NOT a path through the network -- it is a lexical address, the same one that builds
+		# the node's name prefix.
+		self.scope: tuple[str, ...] = scope
+
+	def __repr__(self) -> str:
+		return f"NodeRecord({self.name}, {self.type}, index {self.index}, scope {self.scope})"
+
+
+class InstanceRecord():
+	'''
+	One `use <module>(...) as <name>` instantiation, i.e. one node of the instance TREE.
+
+	Loops and conditionals do not appear here: they share their enclosing scope and so add no
+	level of structure. A submodule instance does, and it is the only construct that does --
+	which is what makes it the natural unit of hierarchy for a consumer that has one (see
+	`is_cell`).
+	'''
+	def __init__(self, scope: tuple[str, ...], module: str, args: tuple,
+	             parent: Optional[tuple[str, ...]], is_cell: bool):
+		self.scope: tuple[str, ...] = scope    # this instance's own address, including its name
+		self.module: str = module              # the module it instantiates
+		self.args: tuple = args                # its resolved arguments
+		self.parent: Optional[tuple[str, ...]] = parent
+		self.children: list[tuple[str, ...]] = []
+		self.is_cell: bool = is_cell           # `... as srv0 cell;`
+
+	def __repr__(self) -> str:
+		cell = ", cell" if self.is_cell else ""
+		return f"InstanceRecord({self.scope}, {self.module}{self.args}{cell})"
+
+
 class NS3CodeGenerator():
 	def __init__(self, modules: dict[str, Block]):
 		self.gpus: dict[str, int] = {}
 		self.switches: dict[str, int] = {}   # regular RDMA switches -> SwitchNode
 		self.nvswitches: dict[str, int] = {} # NVLink-style fabric -> NVSwitchNode
 		self.insns: list[NS3Insn] = []
+		# One record per declared node / per module instance, in declaration order. The NS3*
+		# instructions below are unchanged; these are the structure a non-ns-3 consumer needs
+		# and cannot recover from counts (see NodeRecord, InstanceRecord).
+		self.nodes: list[NodeRecord] = []
+		self.instances: dict[tuple[str, ...], InstanceRecord] = {}
+		# groups of interchangeable nodes declared by `symmetric` statements, as fully-qualified
+		# names. Structural intent, like the cell marker: ns-3 has no use for it and ignores it.
+		self.symmetry_groups: list[list[str]] = []
+		# the module instance currently being flattened, as a chain of instance names
+		self.scope_stack: list[str] = []
 		self.modules: dict[str, Block] = modules
 		self.gpu_counter: int = 0
 		self.switch_counter: int = 0
@@ -130,6 +191,8 @@ class NS3CodeGenerator():
 				return self.GenLoop(this_scope, insn, *args)
 			case RdmaConfigInsn():
 				return self.GenRdmaConfig(this_scope, insn, *args)
+			case SymmetryInsn():
+				return self.GenSymmetry(this_scope, insn, *args)
 			case _:
 				raise RuntimeError(f"Unrecognized instruction {insn}.")
 
@@ -143,28 +206,31 @@ class NS3CodeGenerator():
 			name = prefix + "_" + name
 		match type:
 			case "gpu":
-				self.gpus[name] = self.gpu_counter
+				index = self.gpus[name] = self.gpu_counter
 				self.gpu_counter += 1
 			case "switch":
-				self.switches[name] = self.switch_counter
+				index = self.switches[name] = self.switch_counter
 				self.switch_counter += 1
 			case "nvswitch":
-				self.nvswitches[name] = self.nvswitch_counter
+				index = self.nvswitches[name] = self.nvswitch_counter
 				self.nvswitch_counter += 1
 			case _:
-				raise RuntimeError(f"Unrecognized node type {type}")
+				raise RuntimeError(f"Unrecognized node type {type} on node {name}")
+		attrs = {k: self.ResolveAttr(v, this_scope) for k, v in insn.attrs.items()}
+		self.nodes.append(NodeRecord(name, type, index, attrs, tuple(self.scope_stack)))
+
+	def ResolveRef(self, this_scope: Scope, ref: list[str]) -> str:
+		'''
+		A dotted reference (c1.sw, h{i}.gpu0) as the fully-qualified node name that names the
+		same node in self.gpus / .switches / .nvswitches and in NS3InstallLink.
+		'''
+		name = "_".join(this_scope.resolve_name_with_var(part) for part in ref)
+		prefix = this_scope.get_node_name_prefix()
+		return prefix + "_" + name if prefix != "" else name
 
 	def GenNewLink(self, this_scope: Scope, insn: NewLinkInsn, *args: Any):
-		src = this_scope.resolve_name_with_var(insn.src[0])
-		dst = this_scope.resolve_name_with_var(insn.dst[0])
-		for i in range(1, len(insn.src)):
-			src += "_" + this_scope.resolve_name_with_var(insn.src[i])
-		for i in range(1, len(insn.dst)):
-			dst += "_" + this_scope.resolve_name_with_var(insn.dst[i])
-		pre = this_scope.get_node_name_prefix()
-		if pre != "":
-			src = pre + "_" + src
-			dst = pre + "_" + dst
+		src = self.ResolveRef(this_scope, insn.src)
+		dst = self.ResolveRef(this_scope, insn.dst)
 		# assumes nodes declared before building link
 		# gpu<->gpu is a direct point-to-point link; anything touching a switch or
 		# nvswitch goes over the RDMA/QBB fabric instead
@@ -207,7 +273,23 @@ class NS3CodeGenerator():
 		scope.set_parent(parent_scope)
 		scope.set_node_name_prefix(insn.name)
 		resolved_args = [Expr.resolve(a, parent_scope) for a in insn.args]
-		self.GenerateModule(module, *resolved_args)
+		# The instance name may itself be templated (`as srv{s}`), and it is the RESOLVED name
+		# that addresses this instance -- the same one that goes into its nodes' name prefix.
+		instance_name = parent_scope.resolve_name_with_var(insn.name)
+		parent = tuple(self.scope_stack)
+		self.scope_stack.append(instance_name)
+		address = tuple(self.scope_stack)
+		if address in self.instances:
+			raise RuntimeError(f"Duplicate module instance {'.'.join(address)}.")
+		self.instances[address] = InstanceRecord(
+			address, insn.module_name, tuple(resolved_args),
+			parent if parent else None, getattr(insn, "is_cell", False))
+		if parent in self.instances:
+			self.instances[parent].children.append(address)
+		try:
+			self.GenerateModule(module, *resolved_args)
+		finally:
+			self.scope_stack.pop()
 
 	def GenIf(self, parent_scope: Scope, insn: IfInsn, *args: Any):
 		cond: list[Any] = insn.cond
@@ -232,6 +314,31 @@ class NS3CodeGenerator():
 		scope.set_parent(parent_scope)
 		for i in range(start, end + 1):
 			self.GenerateModule(loop_block, i)
+
+	def GenSymmetry(self, this_scope: Scope, insn: SymmetryInsn, *args: Any):
+		group = [self.ResolveRef(this_scope, ref) for ref in insn.refs]
+		known = set(self.gpus) | set(self.switches) | set(self.nvswitches)
+		unknown = [n for n in group if n not in known]
+		if unknown:
+			# assumes nodes are declared before being referenced, as elsewhere
+			raise RuntimeError(f"symmetric names undeclared node(s) {unknown}.")
+		if len(set(group)) != len(group):
+			raise RuntimeError(f"symmetric lists a node twice: {group}.")
+		self.symmetry_groups.append(group)
+
+	def ResolveAttr(self, value: Any, scope: Scope) -> Any:
+		'''
+		An attribute value with its variables substituted: a (number, unit) pair is kept as-is
+		(the unit is the backend's to interpret), anything else is resolved to an int where it
+		can be, and left alone where it cannot -- a bare string attr is a legitimate value, not
+		an unresolved name.
+		'''
+		if isinstance(value, tuple):
+			return value
+		try:
+			return Expr.resolve(value, scope)
+		except RuntimeError:
+			return value
 
 	def GenRdmaConfig(self, this_scope: Scope, insn: RdmaConfigInsn, *args: Any):
 		for name, value in insn.attrs.items():
