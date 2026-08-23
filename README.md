@@ -7,19 +7,20 @@ backend-agnostic codegen IR, plus a set of example topologies.
 | --- | --- |
 | `grammar.lark` | Lark (LALR) grammar for the `.topo` DSL |
 | `transformer.py` | Parse tree -> topology config objects |
-| `ns3codegen.py` | Config -> list of codegen instructions (IR) |
+| `codegen.py` | Config -> the flattened, backend-neutral IR (`TopologyIR`) |
+| `ns3codegen.py` | ns-3's view of it: `NS3CodeGenerator` + compatibility aliases |
 | `examples/*.topo` | Example input topologies |
 
 ## What the IR carries
 
-`NS3CodeGenerator.Generate()` flattens every module, loop, conditional and submodule
-instantiation. What survives is backend-neutral despite the `NS3` prefix on the class names:
+`TopologyIR.Generate()` flattens every module, loop, conditional and submodule instantiation.
+What survives describes a topology, not any one backend's rendering of it:
 
 | On the generator | Content |
 | --- | --- |
 | `gpus` / `switches` / `nvswitches` | `name -> index within its type`, in declaration order |
-| `link_helpers` | `(latency, bandwidth, mtu, type) -> id` |
-| `insns` | the `NS3InstallLink` list, in source (= cabling) order |
+| `link_classes` | `(latency, bandwidth, mtu, type) -> id` |
+| `insns` | `MakeGPUs` / `MakeSwitches` / `MakeNVSwitches` / `LinkClass`, then the `InstallLink` list in source (= cabling) order |
 | `nodes` | one `NodeRecord` per node: type, index, every declared attribute, and its `scope` |
 | `instances` | one `InstanceRecord` per `use`: module, args, `scope`, `parent`, `children`, `is_cell` |
 | `symmetry_groups` | groups of interchangeable node names, from `symmetric` statements |
@@ -35,11 +36,26 @@ solve on the topology rather than simulate it -- a hierarchical solver collapses
 instance into one coarse node, and uses the symmetry groups to break degenerate ties. TE-CCL's
 `teccl/topologies/dsl_topology.py` is one such consumer.
 
-This repo carries no emitter. A consumer parses with `grammar.lark`, transforms
-with `TopoTransformer`, builds the IR with `NS3CodeGenerator`, and supplies its
-own writer over `codegen.insns`. See the `topology/` directory of
-[ns-3-alibabacloud](https://github.com/Woooooffy/ns-3-alibabacloud), which
-vendors this repo as a submodule and pairs it with `ns3writer.py`.
+## Consuming it
+
+This repo carries no emitter. A consumer parses with `grammar.lark`, transforms with
+`TopoTransformer`, builds the IR with `TopologyIR`, and does what it likes with it -- emit code
+over `ir.insns`, or read the topology straight out of the records without emitting anything. Two
+consumers exist today:
+
+  * the `topology/` directory of
+    [ns-3-alibabacloud](https://github.com/Woooooffy/ns-3-alibabacloud), which pairs this repo
+    with `ns3writer.py` to emit an ns-3 scenario. It subclasses `TopologyIR` as
+    `NS3CodeGenerator` to append one instruction of its own (`NS3BuildRdmaFabric`) in
+    `Finalize()`, which is the whole extension surface a backend needs.
+  * TE-CCL's `teccl/topologies/dsl_topology.py`, which builds a solver's capacity matrix,
+    port map and hierarchy cells from the same objects and emits nothing at all.
+
+`ns3codegen.py` keeps the old `NS3*` names as aliases of the neutral classes -- same classes, so
+`isinstance` and `match`/`case` work in either vocabulary, as do `insn.delay`, `insn.data_rate`,
+`insn.link_helper` and `codegen.link_helpers`. An alias does not change a class's `__name__`,
+though, so an emitter that dispatches on `insn.__class__.__name__ == "NS3MakeGPUs"` must switch to
+`isinstance(insn, NS3MakeGPUs)`.
 
 ## Use as a submodule
 
