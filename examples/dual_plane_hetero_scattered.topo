@@ -1,0 +1,105 @@
+// Scattered-placement variant of dual_plane_hetero.topo: same hardware, same switches, same
+// capacities, same port budget. The ONLY difference is which leaf a GPU hangs off, so a solve
+// difference is attributable to placement and nothing else.
+//
+// Placement: global round-robin, GPU g -> leaf (g mod 3), identical in both planes. 96 / 3
+// divides exactly, so each leaf still gets 32 downlinks. A host's own GPUs are consecutive
+// globally, so its cycle starts at (its first global index) mod 3 -- hence a RAGGED split,
+// since neither host size divides by 3:
+//   hosts 0,3 (16 GPUs) -> 6/5/5 over leaves 0/1/2      host 1 -> 5/6/5    host 2 -> 5/5/6
+//   hosts 4,7 ( 8 GPUs) -> 2/3/3                        host 5 -> 3/3/2    host 6 -> 3/2/3
+//
+// No 6/5/5 split aligns rank i of every host on one switch, so this gets the scattering
+// WITHOUT the rail payoff. What it buys: leaf locality stops being spent on same-host pairs
+// that would have used NVLink anyway -- of the 3968 cross-host GPU pairs, the fraction sharing
+// a leaf goes 22.6% clustered -> 33.3% scattered. What it costs: losing one leaf takes 5-6 GPUs
+// out of EVERY host instead of whole hosts, a degradation-SHAPE difference (the other plane
+// keeps every GPU reachable either way). Which dominates is workload-dependent -- solve the
+// same collective on both files and compare.
+//
+// Hardware, capacities, cabling, port and node numbering: see dual_plane_hetero.topo.
+
+// One host: N GPUs fully served by a single NVSwitch at 1800 GBps per GPU.
+module server(N) {
+    node nvsw type=nvswitch;
+    for g in (0, {N}-1) {
+        node gpu{g} type=gpu;
+        link gpu{g} nvsw bandwidth=1800[GBps] latency=350[ns];
+    }
+}
+
+// The 3 leaves of one plane.
+module leaves() {
+    for l in (0, 2) {
+        node leaf{l} type=switch radix=64;
+    }
+}
+
+// The 2 spines of one plane. Spines are symmetric within plane but not across.
+module spines() {
+    node spine0 type=switch radix=64;
+    node spine1 type=switch radix=64;
+    symmetric spine0 spine1;
+}
+
+module main() {
+    rdma L2AckInterval=0 L2ChunkSize=4000 Mtu=4096 CcMode=12;
+
+    // 8 hosts, each a hierarchy cell: its GPUs + its NVSwitch collapse to one coarse node.
+    // Scattering does not change what a cell IS, but a host now reaches all three leaves of
+    // both planes, so its boundary names six external neighbors instead of two.
+    for i in (0, 3) {
+        use server(16) as host{i} cell;
+    }
+    for i in (4, 7) {
+        use server(8) as host{i} cell;
+    }
+
+    // 2 planes x (3 leaves + 2 spines) = 10 switches. p{i} holds plane i's leaves,
+    // sp{i} its spines.
+    for i in (0, 1) {
+        use leaves() as p{i};
+    }
+    for i in (0, 1) {
+        use spines() as sp{i};
+    }
+
+    for i in (0, 1) {
+        // Host downlinks: one 400 Gbps port per GPU into THIS plane's leaf, chosen by
+        // (global GPU index) mod 3. The DSL has no `%`, so the modulo is x - 3*(x/3) over
+        // integer division; the term added to {g} is the host's first global GPU index
+        // (16*h for the 16-GPU hosts, 8*h+32 for the 8-GPU ones). Hosts ascending and GPUs
+        // ascending within a host means each leaf still numbers its downlinks in ascending
+        // global GPU index -- leaf ports 0-31.
+        for h in (0, 3) {
+            for g in (0, 15) {
+                for l in (0, 2) {
+                    if (({g} + 16 * {h}) - 3 * (({g} + 16 * {h}) / 3) == {l}) {
+                        link host{h}.gpu{g} p{i}.leaf{l} bandwidth=400[Gbps] latency=700[ns];
+                    }
+                }
+            }
+        }
+        for h in (4, 7) {
+            for g in (0, 7) {
+                for l in (0, 2) {
+                    if (({g} + 8 * {h} + 32) - 3 * (({g} + 8 * {h} + 32) / 3) == {l}) {
+                        link host{h}.gpu{g} p{i}.leaf{l} bandwidth=400[Gbps] latency=700[ns];
+                    }
+                }
+            }
+        }
+
+        // Leaf-spine mesh WITHIN the plane: 16 cables to each spine, spine0's before
+        // spine1's (leaf ports 32-47 then 48-63), leaves ascending so each spine numbers
+        // the far ends leaf-major. No cross-plane edge exists.
+        for l in (0, 2) {
+            for c in (0, 15) {
+                link p{i}.leaf{l} sp{i}.spine0 bandwidth=400[Gbps] latency=700[ns];
+            }
+            for c in (0, 15) {
+                link p{i}.leaf{l} sp{i}.spine1 bandwidth=400[Gbps] latency=700[ns];
+            }
+        }
+    }
+}

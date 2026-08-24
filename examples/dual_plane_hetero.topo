@@ -1,0 +1,103 @@
+// a 96-GPU heterogeneous cluster on a DUAL-PLANE, two-tier fabric of 64-port 400 Gbps
+// switches. CLUSTERED placement -- every GPU of a host hangs off the same leaf.
+//
+// Hardware
+//   4 hosts x 16 GPUs + 4 hosts x 8 GPUs = 96 GPUs, each host a full-mesh NVSwitch at
+//   1800 GBps per GPU. Every GPU's NIC is broken out to 2 x 400 Gbps, ONE port into each
+//   plane -- the breakout is what makes two planes possible at all.
+//
+// Plane structure (identical in both planes): 3 leaves, 32-down / 32-up, and 2 spines.
+//   leaf0 : hosts 0,1      (16 + 16 = 32 GPUs)
+//   leaf1 : hosts 2,3      (16 + 16 = 32 GPUs)
+//   leaf2 : hosts 4,5,6,7  (8 x 4   = 32 GPUs)
+//
+// Each leaf<->spine edge has 16 cables. One link in solver; independent subflows downstream.
+//
+// Por numbering
+//   leaf   port  0-31   the 32 GPU downlinks, one 400 Gbps port each
+//          port 32-47   the 16 cables to spine 0
+//          port 48-63   the 16 cables to spine 1     (64 of 64 -- exactly full)
+//   spine  port  0-47   3 leaves x 16 cables, leaf-major     (48 of 64 used)
+//
+// Node numbering
+//   GPUs        0-95     hosts 0-3 own 16 each, hosts 4-7 own 8 each
+//   NVSwitches  96-103   one per host
+//   Leaves      104-109  plane 0: 104,105,106   plane 1: 107,108,109
+//   Spines      110-113  plane 0: 110,111       plane 1: 112,113
+//
+// Latencies: 350 ns inside a host, 700 ns everywhere in the fabric.
+
+// One host: N GPUs fully served by a single NVSwitch at 1800 GBps per GPU.
+module server(N) {
+    node nvsw type=nvswitch;
+    for g in (0, {N}-1) {
+        node gpu{g} type=gpu;
+        link gpu{g} nvsw bandwidth=1800[GBps] latency=350[ns];
+    }
+}
+
+// The 3 leaves of one plane.
+module leaves() {
+    for l in (0, 2) {
+        node leaf{l} type=switch radix=64;
+    }
+}
+
+// The 2 spines of one plane. Spines are symmetric within plane but not across.
+module spines() {
+    node spine0 type=switch radix=64;
+    node spine1 type=switch radix=64;
+    symmetric spine0 spine1;
+}
+
+module main() {
+    rdma L2AckInterval=0 L2ChunkSize=4000 Mtu=4096 CcMode=12;
+
+    // 8 hosts, each a hierarchy cell: its GPUs + its NVSwitch collapse to one coarse node.
+    // A host is dual-homed, so its boundary names TWO external neighbors -- its leaf in
+    // plane 0 and its leaf in plane 1 -- and every GPU owns a port to each.
+    for i in (0, 3) {
+        use server(16) as host{i} cell;
+    }
+    for i in (4, 7) {
+        use server(8) as host{i} cell;
+    }
+
+    // 2 planes x (3 leaves + 2 spines) = 10 switches. p{i} holds plane i's leaves,
+    // sp{i} its spines.
+    for i in (0, 1) {
+        use leaves() as p{i};
+    }
+    for i in (0, 1) {
+        use spines() as sp{i};
+    }
+
+    for i in (0, 1) {
+        // Host downlinks
+        for h in (0, 1) {
+            for g in (0, 15) {
+                link host{h}.gpu{g} p{i}.leaf0 bandwidth=400[Gbps] latency=700[ns];
+            }
+        }
+        for h in (2, 3) {
+            for g in (0, 15) {
+                link host{h}.gpu{g} p{i}.leaf1 bandwidth=400[Gbps] latency=700[ns];
+            }
+        }
+        for h in (4, 7) {
+            for g in (0, 7) {
+                link host{h}.gpu{g} p{i}.leaf2 bandwidth=400[Gbps] latency=700[ns];
+            }
+        }
+
+        // Leaf-spine mesh
+        for l in (0, 2) {
+            for c in (0, 15) {
+                link p{i}.leaf{l} sp{i}.spine0 bandwidth=400[Gbps] latency=700[ns];
+            }
+            for c in (0, 15) {
+                link p{i}.leaf{l} sp{i}.spine1 bandwidth=400[Gbps] latency=700[ns];
+            }
+        }
+    }
+}
