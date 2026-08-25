@@ -1,6 +1,8 @@
 // Rail-optimized DUAL-PLANE spine-leaf tree.
-// 32 nodes x 8 GPUs = 256 GPUs, 8 leaf switches, 4 spine switches -- same node, leaf and
-// spine counts as rail_optimized_256gpu.topo, but split into two isolated fabrics per
+// 32 nodes x 8 GPUs = 256 GPUs, 8 leaf switches, 4 spine switches, 128 ports / switch.
+// Every switch here is 128-port, not the doc's 64-port part: each GPU's 800Gbps port is
+// broken out into 2x400Gbps, one rail into its plane-A leaf and one into its plane-B leaf,
+// so a leaf carries 2 rails x 32 nodes = 64 downlinks plus 64 uplinks (below).
 // https://docs.nvidia.com/enterprise-reference-architectures/hgx-ai-factory/latest/network-logical-architecture.html
 // ("GPU Compute (East/West) Network uses separate, isolated dual-plane leaf-spine
 // architecture ... dual-plane rail-optimized, non-blocking Spectrum fabric with 64-port
@@ -13,14 +15,12 @@
 // (0-indexed: leaf0 <- gpu0,gpu4; leaf1 <- gpu1,gpu5; leaf2 <- gpu2,gpu6; leaf3 <- gpu3,gpu7),
 // matching the doc's "1+5, 2+6, 3+7, 4+8" pairing.
 //
-// Every GPU's 800Gbps port is broken out into 2x400Gbps: one 400Gbps rail into its plane-A
-// leaf, one 400Gbps rail into its plane-B leaf -- so each GPU is dual-homed across the two
-// otherwise-isolated planes, doubling its total NIC bandwidth vs. the single-plane topology
-// while keeping the per-plane rail bandwidth (400Gbps) identical to it. Port breakout is
-// what lets a 64-port leaf carry 2 rails x 32 nodes = 64 downlinks in a single plane.
-//
 // Leaf-spine bandwidth (non-blocking, per plane): a leaf's 64 downlinks x 400Gbps = 25600Gbps
-// aggregate, split evenly over the plane's 2 spines -> 12800Gbps per leaf-spine link.
+// aggregate, split evenly over the plane's 2 spines -> 12800Gbps per leaf-spine edge. That
+// edge is cabled as 32 parallel 400Gbps links rather than declared as one 12800Gbps link:
+// the solver sees the same 12800Gbps aggregate either way, but the cable count reaches
+// Topology.ports, so the post-solve packing (teccl/ncclize/port_split.py) pins each flow to
+// one 400Gbps cable instead of letting it spread across the whole bundle.
 //
 // Latency is a uniform 700 ns on every fabric link, matching rail_optimized_256gpu.topo.
 // One node: 8 GPUs fully served by a single NVSwitch at 1800 GBps per GPU.
@@ -54,30 +54,31 @@ module main() {
     // of every node. Each GPU's broken-out port lands one 400Gbps rail on plane A and one
     // 400Gbps rail on plane B.
     for s in (0, 31) {
-        link leafA0 srv{s}.gpu0 bandwidth=400[Gbps] latency=700[ns];
-        link leafA0 srv{s}.gpu4 bandwidth=400[Gbps] latency=700[ns];
-        link leafA1 srv{s}.gpu1 bandwidth=400[Gbps] latency=700[ns];
-        link leafA1 srv{s}.gpu5 bandwidth=400[Gbps] latency=700[ns];
-        link leafA2 srv{s}.gpu2 bandwidth=400[Gbps] latency=700[ns];
-        link leafA2 srv{s}.gpu6 bandwidth=400[Gbps] latency=700[ns];
-        link leafA3 srv{s}.gpu3 bandwidth=400[Gbps] latency=700[ns];
-        link leafA3 srv{s}.gpu7 bandwidth=400[Gbps] latency=700[ns];
-
-        link leafB0 srv{s}.gpu0 bandwidth=400[Gbps] latency=700[ns];
-        link leafB0 srv{s}.gpu4 bandwidth=400[Gbps] latency=700[ns];
-        link leafB1 srv{s}.gpu1 bandwidth=400[Gbps] latency=700[ns];
-        link leafB1 srv{s}.gpu5 bandwidth=400[Gbps] latency=700[ns];
-        link leafB2 srv{s}.gpu2 bandwidth=400[Gbps] latency=700[ns];
-        link leafB2 srv{s}.gpu6 bandwidth=400[Gbps] latency=700[ns];
-        link leafB3 srv{s}.gpu3 bandwidth=400[Gbps] latency=700[ns];
-        link leafB3 srv{s}.gpu7 bandwidth=400[Gbps] latency=700[ns];
+        // A name's {...} suffix takes a variable or a literal, never arithmetic, so the
+        // second rail of leaf i -- gpu i+4 -- is bound by a one-iteration loop, whose
+        // bounds ARE expressions.
+        for i in (0, 3) {
+            link leafA{i} srv{s}.gpu{i} bandwidth=400[Gbps] latency=700[ns];
+            for j in ({i}+4, {i}+4) {
+                link leafA{i} srv{s}.gpu{j} bandwidth=400[Gbps] latency=700[ns];
+            }
+        }
+        for i in (0, 3) {
+            link leafB{i} srv{s}.gpu{i} bandwidth=400[Gbps] latency=700[ns];
+            for j in ({i}+4, {i}+4) {
+                link leafB{i} srv{s}.gpu{j} bandwidth=400[Gbps] latency=700[ns];
+            }
+        }
     }
 
-    // Fully-connected leaf-spine mesh, isolated per plane.
+    // Fully-connected leaf-spine mesh, isolated per plane. Each leaf-spine edge is a bundle
+    // of 32 x 400Gbps cables = 12800Gbps.
     for l in (0, 3) {
         for p in (0, 1) {
-            link leafA{l} spineA{p} bandwidth=12800[Gbps] latency=700[ns];
-            link leafB{l} spineB{p} bandwidth=12800[Gbps] latency=700[ns];
+            for c in (0, 31) {
+                link leafA{l} spineA{p} bandwidth=400[Gbps] latency=700[ns];
+                link leafB{l} spineB{p} bandwidth=400[Gbps] latency=700[ns];
+            }
         }
     }
 }
