@@ -1,0 +1,134 @@
+// DEFECTED VARIANT of dual_plane_hetero.topo: LEAF FAILURE.
+// Plane 1 has lost leaf2 -- the leaf serving the four 8-GPU hosts (hosts 4-7). The
+// switch, its 32 GPU downlinks, and its 32 uplinks are all removed. Plane 0 is
+// untouched.
+//
+// Consequence: hosts 0-3 stay dual-homed (one port into each plane), but hosts 4-7
+// become SINGLE-HOMED on plane 0 -- their plane-1 NIC port has nothing to attach to,
+// so their off-host bandwidth is halved and all of their traffic contends on plane 0.
+//
+// Hardware
+//   4 hosts x 16 GPUs + 4 hosts x 8 GPUs = 96 GPUs, each host a full-mesh NVSwitch at
+//   1800 GBps per GPU. Every GPU's NIC is broken out to 2 x 400 Gbps, ONE port into each
+//   plane -- on hosts 4-7 the plane-1 half of that breakout is now stranded.
+//
+// Plane structure
+//   plane 0 (healthy)  : 3 leaves, 32-down / 32-up, and 2 spines.
+//     leaf0 : hosts 0,1      (16 + 16 = 32 GPUs)
+//     leaf1 : hosts 2,3      (16 + 16 = 32 GPUs)
+//     leaf2 : hosts 4,5,6,7  (8 x 4   = 32 GPUs)
+//   plane 1 (degraded) : 2 leaves, 32-down / 32-up, and 2 spines.
+//     leaf0 : hosts 0,1      (16 + 16 = 32 GPUs)
+//     leaf1 : hosts 2,3      (16 + 16 = 32 GPUs)
+//     (leaf2 is GONE -- hosts 4-7 have no plane-1 attachment)
+//
+// Each leaf<->spine edge still has 16 cables. One link in solver; independent subflows
+// downstream. Plane 1's spines now use only 2 x 16 = 32 of their 48 cabled ports.
+//
+// Port numbering
+//   leaf           port  0-31   the 32 GPU downlinks, one 400 Gbps port each
+//                  port 32-47   the 16 cables to spine 0
+//                  port 48-63   the 16 cables to spine 1     (64 of 64 -- exactly full)
+//   spine (plane 0) port 0-47   3 leaves x 16 cables, leaf-major   (48 of 64 used)
+//   spine (plane 1) port 0-31   2 leaves x 16 cables, leaf-major   (32 of 64 used)
+//
+// Node numbering
+//   GPUs        0-95     hosts 0-3 own 16 each, hosts 4-7 own 8 each
+//   NVSwitches  96-103   one per host
+//   Leaves      104-108  plane 0: 104,105,106   plane 1: 107,108   (leaf2 of plane 1 GONE)
+//   Spines      109-112  plane 0: 109,110       plane 1: 111,112
+//
+// Latencies: 350 ns inside a host, 700 ns everywhere in the fabric.
+
+// One host: N GPUs fully served by a single NVSwitch at 1800 GBps per GPU.
+module server(N) {
+    node nvsw type=nvswitch;
+    for g in (0, {N}-1) {
+        node gpu{g} type=gpu;
+        link gpu{g} nvsw bandwidth=1800[GBps] latency=350[ns];
+    }
+}
+
+// The 3 leaves of a healthy plane.
+module leaves() {
+    for l in (0, 2) {
+        node leaf{l} type=switch radix=64;
+    }
+}
+
+// The leaf layer of the DEGRADED plane: leaf2 failed, only leaf0 and leaf1 survive.
+module leaves_leaf2_down() {
+    for l in (0, 1) {
+        node leaf{l} type=switch radix=64;
+    }
+}
+
+// The 2 spines of one plane. Spines are symmetric within plane but not across.
+module spines() {
+    node spine0 type=switch radix=64;
+    node spine1 type=switch radix=64;
+    symmetric spine0 spine1;
+}
+
+module main() {
+    rdma L2AckInterval=0 L2ChunkSize=4000 Mtu=4096 CcMode=12;
+
+    // 8 hosts, each a hierarchy cell: its GPUs + its NVSwitch collapse to one coarse node.
+    // Hosts 0-3 are dual-homed (a leaf in each plane); hosts 4-7 are now single-homed
+    // and their boundary names ONE external neighbor, p0.leaf2.
+    for i in (0, 3) {
+        use server(16) as host{i} cell;
+    }
+    for i in (4, 7) {
+        use server(8) as host{i} cell;
+    }
+
+    // Leaves: plane 0 healthy (3), plane 1 down to 2.
+    use leaves() as p0;
+    use leaves_leaf2_down() as p1;
+    // Spines are intact in both planes.
+    for i in (0, 1) {
+        use spines() as sp{i};
+    }
+
+    // Host downlinks for the 16-GPU hosts -- still one port into each plane.
+    for i in (0, 1) {
+        for h in (0, 1) {
+            for g in (0, 15) {
+                link host{h}.gpu{g} p{i}.leaf0 bandwidth=400[Gbps] latency=700[ns];
+            }
+        }
+        for h in (2, 3) {
+            for g in (0, 15) {
+                link host{h}.gpu{g} p{i}.leaf1 bandwidth=400[Gbps] latency=700[ns];
+            }
+        }
+    }
+
+    // Host downlinks for the 8-GPU hosts -- PLANE 0 ONLY; p1.leaf2 no longer exists.
+    for h in (4, 7) {
+        for g in (0, 7) {
+            link host{h}.gpu{g} p0.leaf2 bandwidth=400[Gbps] latency=700[ns];
+        }
+    }
+
+    // Leaf-spine mesh, plane 0: all 3 leaves.
+    for l in (0, 2) {
+        for c in (0, 15) {
+            link p0.leaf{l} sp0.spine0 bandwidth=400[Gbps] latency=700[ns];
+        }
+        for c in (0, 15) {
+            link p0.leaf{l} sp0.spine1 bandwidth=400[Gbps] latency=700[ns];
+        }
+    }
+
+    // Leaf-spine mesh, plane 1: only the 2 surviving leaves.
+    for l in (0, 1) {
+        for c in (0, 15) {
+            link p1.leaf{l} sp1.spine0 bandwidth=400[Gbps] latency=700[ns];
+        }
+        for c in (0, 15) {
+            link p1.leaf{l} sp1.spine1 bandwidth=400[Gbps] latency=700[ns];
+        }
+    }
+}
