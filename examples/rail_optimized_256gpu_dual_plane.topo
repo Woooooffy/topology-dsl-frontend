@@ -1,8 +1,9 @@
 // Rail-optimized DUAL-PLANE spine-leaf tree.
-// 32 nodes x 8 GPUs = 256 GPUs, 8 leaf switches, 4 spine switches, 128 ports / switch.
-// Every switch here is 128-port, not the doc's 64-port part: each GPU's 800Gbps port is
+// 32 nodes x 8 GPUs = 256 GPUs, 8 leaf switches, 4 spine switches.
+// The leaves here are 128-port, not the doc's 64-port part: each GPU's 800Gbps port is
 // broken out into 2x400Gbps, one rail into its plane-A leaf and one into its plane-B leaf,
-// so a leaf carries 2 rails x 32 nodes = 64 downlinks plus 64 uplinks (below).
+// so a leaf carries 2 rails x 32 nodes = 64 downlinks plus 32 uplinks (below). The spines
+// stay within 64 ports -- see the port budget below.
 // https://docs.nvidia.com/enterprise-reference-architectures/hgx-ai-factory/latest/network-logical-architecture.html
 // ("GPU Compute (East/West) Network uses separate, isolated dual-plane leaf-spine
 // architecture ... dual-plane rail-optimized, non-blocking Spectrum fabric with 64-port
@@ -10,17 +11,28 @@
 // each GPU has an individual 400Gb connection to each plane via an 800Gb port broken out
 // to 2x400Gb").
 //
+// NOTE this file departs from the doc on one point, deliberately: the doc's fabric is
+// non-blocking, this one is 2:1 oversubscribed at the spine (see below). The single-plane
+// rail_optimized_256gpu.topo is the non-blocking counterpart.
+//
 // Plane A = leafA0-3 + spineA0-1. Plane B = leafB0-3 + spineB0-1 (mirror, fully isolated
 // from plane A -- no link crosses planes). Each of the 4 leaves in a plane carries 2 rails
 // (0-indexed: leaf0 <- gpu0,gpu4; leaf1 <- gpu1,gpu5; leaf2 <- gpu2,gpu6; leaf3 <- gpu3,gpu7),
 // matching the doc's "1+5, 2+6, 3+7, 4+8" pairing.
 //
-// Leaf-spine bandwidth (non-blocking, per plane): a leaf's 64 downlinks x 400Gbps = 25600Gbps
-// aggregate, split evenly over the plane's 2 spines -> 12800Gbps per leaf-spine edge. That
-// edge is cabled as 32 parallel 400Gbps links rather than declared as one 12800Gbps link:
-// the solver sees the same 12800Gbps aggregate either way, but the cable count reaches
-// Topology.ports, so the post-solve packing (teccl/ncclize/port_split.py) pins each flow to
-// one 400Gbps cable instead of letting it spread across the whole bundle.
+// Leaf-spine bandwidth, 2:1 OVERSUBSCRIBED per plane: a leaf's 64 downlinks x 400Gbps =
+// 25600Gbps aggregate, but only 12800Gbps of uplink, split evenly over the plane's 2 spines
+// -> 6400Gbps per leaf-spine edge. A rail-optimized collective keeps most traffic on the
+// leaf, so the spine tier is provisioned for the residual cross-rail share rather than for
+// a full non-blocking cut; anything that does saturate the cut (e.g. alltoall) sees the 2:1
+// taper. Each edge is cabled as 16 parallel 400Gbps links rather than declared as one
+// 6400Gbps link: the solver sees the same 6400Gbps aggregate either way, but the cable count
+// reaches Topology.ports, so the post-solve packing (teccl/ncclize/port_split.py) pins each
+// flow to one 400Gbps cable instead of letting it spread across the whole bundle.
+//
+// Port budget per leaf:  64 down (2 rails x 32 nodes) + 32 up (2 spines x 16) = 96 of 128.
+// Port budget per spine: 4 leaves x 16 = 64 ports -- at 2:1 the spine tier fits the doc's
+// 64-port part exactly; only the leaves need the 128-port switch.
 //
 // Latency is a uniform 700 ns on every fabric link, matching rail_optimized_256gpu.topo.
 // One node: 8 GPUs fully served by a single NVSwitch at 1800 GBps per GPU.
@@ -72,10 +84,10 @@ module main() {
     }
 
     // Fully-connected leaf-spine mesh, isolated per plane. Each leaf-spine edge is a bundle
-    // of 32 x 400Gbps cables = 12800Gbps.
+    // of 16 x 400Gbps cables = 6400Gbps (2:1 oversubscribed against 25600Gbps of downlink).
     for l in (0, 3) {
         for p in (0, 1) {
-            for c in (0, 31) {
+            for c in (0, 15) {
                 link leafA{l} spineA{p} bandwidth=400[Gbps] latency=700[ns];
                 link leafB{l} spineB{p} bandwidth=400[Gbps] latency=700[ns];
             }

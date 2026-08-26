@@ -8,6 +8,14 @@
 //
 // Rail-optimized: leaf l attaches to GPU l of every node, so each of the 8
 // GPUs in a node lands on a distinct leaf (rail).
+//
+// Fabric is non-blocking: a leaf's 32 downlinks x 400Gbps = 12800Gbps aggregate,
+// split evenly over the 4 spines -> 3200Gbps per leaf-spine edge. That edge is
+// cabled as 8 parallel 400Gbps links rather than declared as one 3200Gbps link:
+// the solver sees the same 3200Gbps aggregate either way, but the cable count
+// reaches Topology.ports, so the post-solve packing (teccl/ncclize/port_split.py)
+// pins each flow to one 400Gbps cable instead of letting it spread across the
+// whole bundle.
 
 // Latency is a uniform 700 ns on every link. The Python classes these files port give
 // intra-host links a shorter alpha (0.35 us), but no result here turns on it -- the
@@ -46,10 +54,13 @@ module main() {
     }
 
     // Fully-connected leaf-spine mesh. Each leaf-spine pair is one bundle of
-    // 8 x 400Gbps = 3200Gbps (8 ports on each side).
+    // 8 x 400Gbps = 3200Gbps (8 ports on each side), cabled as 8 parallel links
+    // rather than one fat 3200Gbps link (see header).
     for l in (0, 7) {
         for p in (0, 3) {
-            link leaf{l} spine{p} bandwidth=3200[Gbps] latency=700[ns];
+            for c in (0, 7) {
+                link leaf{l} spine{p} bandwidth=400[Gbps] latency=700[ns];
+            }
         }
     }
 }
