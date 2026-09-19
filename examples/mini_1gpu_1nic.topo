@@ -1,0 +1,65 @@
+// VARIANT 1 -- smallest of the three: 1 GPU per host, 1 NIC per host.
+// 4 hosts = 4 GPUs, 2 leaf switches, 2 spine switches. No host tier.
+//
+// FABRIC (identical in all three mini_*_*nic.topo files, so they form a controlled set;
+// only the host interior changes):
+//   2 hosts per leaf, every leaf meshed to both spines, 2:1 taper on the leaf uplinks.
+//   200Gbps of downlink per leaf (2 x 100Gbps) against 100Gbps of uplink (2 x 50Gbps).
+//
+// WHY 4 HOSTS AND WHY THE 2:1 TAPER -- both are forced by "multipath must strictly pay":
+//
+//   Let E = host egress (100Gbps here) and V = bytes a host contributes to the allgather.
+//   Every host must RECEIVE (H-1)V, so makespan >= 3V/E at H=4. That bound does not care
+//   how anything is routed, and it is also the egress bound: relaying leaf0-origin data
+//   between the two hosts of leaf1 costs exactly as much egress as it saves, so total
+//   egress on a leaf's side is 6V no matter what. Routing cannot beat 3V/E.
+//
+//   Minimum bytes crossing the leaf cut is 2V: the leaf cannot copy (switch_copy=false),
+//   so each of the 2 leaf0-origin payloads must cross at least once. With ONE spine the
+//   cut carries B_s * T, so one spine binds iff  2V > B_s * 3V/E,  i.e.  B_s < (2/3)E,
+//   i.e. leaf taper > 1.5:1. At 2:1 (B_s = E/2) one spine gives T >= 4V/E against the
+//   two-spine bound of 3V/E -- the bounds separate by 4/3 and multipath strictly pays.
+//
+//   A NON-BLOCKING leaf would NOT do this: at 1:1 even a single spine carries 2V inside
+//   3V/E, so the cut never binds and the second spine is decoration. This is the same
+//   trap as the one-pod rail fabric in mini_rail_multipath.topo, in a different disguise.
+//
+//   3 hosts would leave one leaf serving a single host; 2 hosts degenerates into two
+//   parallel one-hop paths between a single pair, which is the contrived case this set
+//   exists to avoid. 4 is the smallest count where a leaf is actually an aggregator.
+//
+// Structurally this is fat_tree_pod.topo at k=4 with the uplinks tapered -- the taper is
+// the whole difference, and it is what makes the second spine load-bearing.
+//
+// BUILD NOTE: the 50Gbps uplinks are meant to be 100G optics with the two uplink ports
+// egress-shaped to 50G, so the whole thing is one switch model and one cable type.
+// Port budget: leaf = 2 down + 2 up = 4 ports, spine = 2 ports. Latency 700 ns throughout.
+
+module main() {
+    rdma L2AckInterval=0 L2ChunkSize=4000 Mtu=4096 CcMode=12;
+
+    for s in (0, 3) {
+        node gpu{s} type=gpu;
+    }
+    for l in (0, 1) {
+        node leaf{l} type=switch;
+    }
+    for p in (0, 1) {
+        node spine{p} type=switch;
+    }
+
+    // gpu0,gpu1 home on leaf0; gpu2,gpu3 on leaf1.
+    for s in (0, 1) {
+        link leaf0 gpu{s} bandwidth=100[Gbps] latency=700[ns];
+    }
+    for s in (2, 3) {
+        link leaf1 gpu{s} bandwidth=100[Gbps] latency=700[ns];
+    }
+
+    // 2:1 taper: 200Gbps down, 2 x 50Gbps up.
+    for l in (0, 1) {
+        for p in (0, 1) {
+            link leaf{l} spine{p} bandwidth=50[Gbps] latency=700[ns];
+        }
+    }
+}

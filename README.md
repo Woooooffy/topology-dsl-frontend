@@ -25,6 +25,30 @@ What survives describes a topology, not any one backend's rendering of it:
 | `instances` | one `InstanceRecord` per `use`: module, args, `scope`, `parent`, `children`, `is_cell` |
 | `symmetry_groups` | groups of interchangeable node names, from `symmetric` statements |
 
+### Node types and their aliases
+
+A node is one of three types, and the `switch` / `nvswitch` split names a ROUTING property
+rather than a product: `switch` is programmable (the solver installs forwarding entries on it),
+while `nvswitch` is self-routing (the solver routes through it freely but never programs it, so
+it stays out of the emitted table).
+
+Because that property has nothing to do with NVLink, the parser accepts synonyms for the
+self-routing type and folds them to the canonical name immediately, at the parse boundary --
+every consumer downstream sees only the three canonical types:
+
+| Write | Means | Use it for |
+| --- | --- | --- |
+| `gpu` | endpoint that holds data | — |
+| `switch` | programmable | leaf, spine, any switch the solver programs |
+| `nvswitch` | self-routing | an NVSwitch |
+| `pcie` | self-routing (alias) | a PCIe root complex or PCIe switch |
+| `self_routing` | self-routing (alias) | any other fixed-function fabric |
+
+Aliases live in `NODE_TYPE_ALIASES` in `transformer.py`; adding one is a single line and costs
+nothing downstream. A type that is not in the table is passed through untouched and rejected by
+`codegen.GenNewNode` exactly as before -- the table widens the vocabulary, it does not take over
+validating it.
+
 `scope` is a node's or an instance's LEXICAL address -- the chain of instance names from `main`
 downward, e.g. `("rack0", "host1")`. It is not a path through the network; it is the same address
 that builds a node's name prefix, and it is what lets a consumer recover the module structure the

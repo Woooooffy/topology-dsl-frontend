@@ -1,0 +1,105 @@
+// VARIANT 2 -- 2 GPUs per host, ONE shared NIC, PCIe-attached (no intra-host NVSwitch).
+// 4 hosts x 2 GPUs = 8 GPUs, 4 PCIe root complexes, 2 leaf switches, 2 spine switches.
+//
+// HOST INTERIOR -- this is a plain PCIe box, not an HGX baseboard:
+//
+//         gpu0 ======= NVLink bridge (56 GBps) ======= gpu1
+//           \                                          /
+//       PCIe x16                                  PCIe x16
+//       200Gbps                                    200Gbps
+//             \                                  /
+//              +---------- rc (root complex) ---+
+//                             |
+//                        NIC, 100Gbps
+//                             |
+//                          leaf0/1
+//
+//   The two GPUs have a DIRECT NVLink bridge, and they also have a PCIe path to each
+//   other through the root complex -- two intra-host routes, which is a real routing
+//   choice for the solver (prefer NVLink peer-to-peer, keep PCIe free for NIC traffic).
+//   But the NVLink bridge DOES NOT REACH THE NETWORK. There is exactly one NIC and it
+//   hangs off the root complex, so every byte either GPU sends to or receives from the
+//   fabric crosses its PCIe x16 and then the shared 100Gbps port. That funnel is the
+//   entire point of this variant.
+//
+//   `rc` is typed `pcie`, which the DSL folds to the canonical `nvswitch` at parse time. In
+//   this codebase the nvswitch/switch split is TE-CCL's SELF-ROUTING/PROGRAMMABLE split: the
+//   solver routes through an nvswitch freely but installs no forwarding entry on it. A PCIe
+//   root complex is self-routing, so that IS the correct type -- but spelling it `nvswitch`
+//   reads as a mistake, hence the alias. See NODE_TYPE_ALIASES in transformer.py.
+//
+// NUMBERS, per direction (TE-CCL's `bandwidth` is per-direction; a `link` grants it both
+// ways), all of them ordinary cheap-lab parts:
+//   NVLink bridge  56[GBps]  -- an RTX A6000-class bridge is 112 GB/s BIDIRECTIONAL,
+//                              i.e. 56 GB/s each way. An A100/H100 PCIe bridge is ~10x
+//                              this; the conclusions below do not depend on which, since
+//                              either is far above the NIC.
+//   PCIe Gen4 x16  200[Gbps] -- ~25 GB/s of the 31.5 GB/s line rate, full duplex.
+//   NIC            100[Gbps] -- 12.5 GB/s, ONE port shared by both GPUs.
+// The hierarchy NVLink (56) >> PCIe (25) >> NIC (12.5) GB/s is what makes the host behave
+// as a single 100Gbps endpoint with a nearly free interior.
+//
+// FABRIC -- identical to mini_1gpu_1nic.topo, bit for bit, so the two are a controlled
+// pair: 2 hosts per leaf, 200Gbps of downlink per leaf against 2 x 50Gbps of uplink,
+// 2:1 tapered, both leaves meshed to both spines.
+//
+// NOT MARKED `cell`, AND IT CANNOT BE. DslTopology._build_cell asserts that a cell's
+// external links are owned by its GPUs, because abstract() reads a cell's boundary only
+// through cell.gpus -- a switch reaching out of the cell would produce a coarse edge no
+// GPU owns. Here the one external link is the NIC, owned by `rc`, so marking this
+// instance trips that assert. Consequence: this variant is a FLAT-solve topology only;
+// the hierarchical path cannot fold its host tier. That is a property of the shared-NIC
+// shape itself -- it is precisely because the NIC hangs off the root complex rather than
+// off a GPU -- and not of this file. Variants 1 and 3 do not have it (variant 1 has no
+// host tier to fold, variant 3's GPUs own their own NICs).
+//
+// HOST COUNT AND TAPER: the derivation written out in mini_1gpu_1nic.topo runs on host
+// egress E and per-host payload V, never on what is behind the NIC, so it is unchanged
+// here -- E is still 100Gbps (the NVLink bridge adds nothing to it, having no path to
+// the fabric), V is now 2 GPUs' worth of data, and "4 hosts, taper > 1.5:1" lands
+// identically. 2:1 separates the one-spine and two-spine bounds by 4/3.
+//
+// BUILD NOTE: the 50Gbps uplinks are meant to be 100G optics with the two uplink ports
+// egress-shaped to 50G, so the whole fabric is one switch model and one cable type.
+// Port budget: leaf = 2 down + 2 up = 4 ports, spine = 2 ports. Latency 700 ns throughout
+// (the Python classes these files echo use a shorter intra-host alpha, but nothing here
+// turns on it -- every binding constraint is a capacity cut).
+
+module host() {
+    node rc type=pcie;
+    for g in (0, 1) {
+        node gpu{g} type=gpu;
+        link gpu{g} rc bandwidth=200[Gbps] latency=700[ns];
+    }
+    // Direct peer-to-peer bridge, parallel to the PCIe path through rc.
+    link gpu0 gpu1 bandwidth=56[GBps] latency=700[ns];
+}
+
+module main() {
+    rdma L2AckInterval=0 L2ChunkSize=4000 Mtu=4096 CcMode=12;
+
+    for s in (0, 3) {
+        use host() as srv{s};
+    }
+    for l in (0, 1) {
+        node leaf{l} type=switch;
+    }
+    for p in (0, 1) {
+        node spine{p} type=switch;
+    }
+
+    // The shared NIC: the root complex, not a GPU, carries the host's one fabric port.
+    for s in (0, 1) {
+        link leaf0 srv{s}.rc bandwidth=100[Gbps] latency=700[ns];
+    }
+    for s in (2, 3) {
+        link leaf1 srv{s}.rc bandwidth=100[Gbps] latency=700[ns];
+    }
+
+    // 2:1 taper: 200Gbps down, 2 x 50Gbps up.
+    for l in (0, 1) {
+        for p in (0, 1) {
+            link leaf{l} spine{p} bandwidth=50[Gbps] latency=700[ns];
+        }
+    }
+}

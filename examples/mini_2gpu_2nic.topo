@@ -1,0 +1,62 @@
+// VARIANT 3 -- 2 GPUs per host, ONE NIC PER GPU. The richest of the three.
+// 4 hosts x 2 GPUs = 8 GPUs, 4 host switches, 2 leaf switches, 2 spine switches.
+// (Supersedes the earlier mini_leafspine_multipath.topo, rescaled to 100G and tapered.)
+//
+// Fabric shape is the same as the other two, doubled in width because each host now
+// presents two ports: 4 downlinks per leaf (2 hosts x 2 NICs) x 100Gbps = 400Gbps
+// against 2 x 100Gbps of uplink -- still exactly 2:1, still 2 hosts per leaf.
+//
+// The host-count and taper derivation in mini_1gpu_1nic.topo carries over unchanged: it
+// is written in host egress E, so doubling E to 200Gbps doubles B_s to 100Gbps and the
+// "taper > 1.5:1" threshold is identical. 2:1 again separates the one-spine and two-spine
+// bounds by 4/3.
+//
+// Each GPU owning a NIC means a GPU can reach the fabric without crossing the host's
+// internal fabric at all, so this is the variant where the intra-host tier becomes an
+// OPTIONAL relay rather than a mandatory funnel -- the routing choice that variant 2
+// cannot express. Intra-host stays PCIe-class (200Gbps); set it to 1800[GBps] to model
+// an NVSwitch host instead.
+//
+// Port budget: leaf = 4 down + 2 up = 6 ports, spine = 2 ports. Any 8-port switch does.
+// Here the uplinks are unshaped 100G, so this variant needs no port shaping at all.
+
+module host() {
+    node hsw type=nvswitch;
+    for g in (0, 1) {
+        node gpu{g} type=gpu;
+        link gpu{g} hsw bandwidth=200[Gbps] latency=700[ns];
+    }
+}
+
+module main() {
+    rdma L2AckInterval=0 L2ChunkSize=4000 Mtu=4096 CcMode=12;
+
+    for s in (0, 3) {
+        use host() as srv{s} cell;
+    }
+    for l in (0, 1) {
+        node leaf{l} type=switch;
+    }
+    for p in (0, 1) {
+        node spine{p} type=switch;
+    }
+
+    // Every GPU carries its own NIC into its host's leaf.
+    for s in (0, 1) {
+        for g in (0, 1) {
+            link leaf0 srv{s}.gpu{g} bandwidth=100[Gbps] latency=700[ns];
+        }
+    }
+    for s in (2, 3) {
+        for g in (0, 1) {
+            link leaf1 srv{s}.gpu{g} bandwidth=100[Gbps] latency=700[ns];
+        }
+    }
+
+    // 2:1 taper: 400Gbps down, 2 x 100Gbps up.
+    for l in (0, 1) {
+        for p in (0, 1) {
+            link leaf{l} spine{p} bandwidth=100[Gbps] latency=700[ns];
+        }
+    }
+}

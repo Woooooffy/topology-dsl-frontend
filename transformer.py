@@ -3,6 +3,34 @@ from typing import Optional, Any, Callable, TypedDict
 import re
 import operator
 
+# Surface spellings for a node's `type`. The key is what a .topo file may write, the value is
+# the canonical type the IR carries -- an alias is folded away here, at the parse boundary, so
+# every consumer downstream (codegen, ns3codegen, DslTopology, the hierarchy cells) keeps seeing
+# exactly the three canonical types and needs no change to gain one.
+#
+# Why aliases exist at all: TE-CCL's two switch types name a ROUTING property, not a product.
+# `switch` is programmable -- the solver installs forwarding entries on it -- while `nvswitch` is
+# self-routing: the solver routes through it freely but never programs it, so it stays out of the
+# emitted table. Nothing about that is specific to NVLink, so a PCIe root complex, a PCIe switch
+# or any other fixed-function fabric is an `nvswitch` in every way that matters here, and writing
+# `type=nvswitch` on one reads as a mistake rather than as the deliberate choice it is.
+#
+# Adding a spelling is one line, and costs nothing downstream. A name that is not listed is left
+# untouched and still reaches codegen, which rejects it there with the same error as before --
+# this table widens the accepted vocabulary, it does not take over validating it.
+NODE_TYPE_ALIASES = {
+    "pcie": "nvswitch",          # a PCIe root complex or PCIe switch
+    "self_routing": "nvswitch",  # the property itself, for any other fixed-function fabric
+}
+
+
+def canonical_node_type(node_type: Any) -> Any:
+    """The canonical spelling of `node_type`, or `node_type` unchanged if it is not an alias."""
+    if isinstance(node_type, str):
+        return NODE_TYPE_ALIASES.get(node_type, node_type)
+    return node_type
+
+
 ops = {
     "==": operator.eq,
     "!=": operator.ne,
@@ -238,7 +266,11 @@ class TopoTransformer(Transformer):
 	def	node_stmt(self, items) -> Insn:
 		name = str(items[0])
 		attrs = dict(items[1:])
-		node_type = attrs.get("type", "default")
+		node_type = canonical_node_type(attrs.get("type", "default"))
+		# Rewrite the attr too, so NodeRecord.attrs and NodeRecord.type cannot disagree about
+		# what this node is: `type` is the one attr that is also structural.
+		if "type" in attrs:
+			attrs["type"] = node_type
 		return NewNodeInsn(name, node_type, attrs)
 
 
