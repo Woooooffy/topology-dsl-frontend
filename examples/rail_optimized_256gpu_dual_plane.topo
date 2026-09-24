@@ -13,7 +13,8 @@
 //
 // NOTE this file departs from the doc on one point, deliberately: the doc's fabric is
 // non-blocking, this one is 2:1 oversubscribed at the spine (see below). The single-plane
-// rail_optimized_256gpu.topo is the non-blocking counterpart.
+// rail_optimized_256gpu.topo carries the same 2:1 taper, so the two differ only in the
+// per-GPU rail count and the plane isolation.
 //
 // Plane A = leafA0-3 + spineA0-1. Plane B = leafB0-3 + spineB0-1 (mirror, fully isolated
 // from plane A -- no link crosses planes). Each of the 4 leaves in a plane carries 2 rails

@@ -1,21 +1,24 @@
 // Rail-optimized single-plane spine-leaf tree.
 // 32 nodes x 8 GPUs = 256 GPUs, 8 leaf switches, 4 spine switches.
-// Each switch has 64 x 400Gbps ports.
+// Switches are 64 x 400Gbps ports; at 2:1 neither tier fills the part.
 //
 // Port budget per leaf:  32 down (1 GPU rail from each of the 32 nodes)
-//                      + 32 up   (4 spines x 8 ports each) = 64 ports.
-// Port budget per spine: 8 leaves x 8 ports = 64 ports.
+//                      + 16 up   (4 spines x 4 ports each) = 48 of 64 ports.
+// Port budget per spine: 8 leaves x 4 ports = 32 of 64 ports.
 //
 // Rail-optimized: leaf l attaches to GPU l of every node, so each of the 8
 // GPUs in a node lands on a distinct leaf (rail).
 //
-// Fabric is non-blocking: a leaf's 32 downlinks x 400Gbps = 12800Gbps aggregate,
-// split evenly over the 4 spines -> 3200Gbps per leaf-spine edge. That edge is
-// cabled as 8 parallel 400Gbps links rather than declared as one 3200Gbps link:
-// the solver sees the same 3200Gbps aggregate either way, but the cable count
-// reaches Topology.ports, so the post-solve packing (teccl/ncclize/port_split.py)
-// pins each flow to one 400Gbps cable instead of letting it spread across the
-// whole bundle.
+// Leaf-spine bandwidth, 2:1 OVERSUBSCRIBED: a leaf's 32 downlinks x 400Gbps =
+// 12800Gbps aggregate, but only 6400Gbps of uplink, split evenly over the 4
+// spines -> 1600Gbps per leaf-spine edge. This matches the taper of the
+// dual-plane rail_optimized_256gpu_dual_plane.topo, so the two differ only in
+// the per-GPU rail count and the plane isolation, not in the fabric cut ratio.
+// Each edge is cabled as 4 parallel 400Gbps links rather than declared as one
+// 1600Gbps link: the solver sees the same 1600Gbps aggregate either way, but
+// the cable count reaches Topology.ports, so the post-solve packing
+// (teccl/ncclize/port_split.py) pins each flow to one 400Gbps cable instead of
+// letting it spread across the whole bundle.
 
 // Latency is a uniform 700 ns on every link. The Python classes these files port give
 // intra-host links a shorter alpha (0.35 us), but no result here turns on it -- the
@@ -54,11 +57,11 @@ module main() {
     }
 
     // Fully-connected leaf-spine mesh. Each leaf-spine pair is one bundle of
-    // 8 x 400Gbps = 3200Gbps (8 ports on each side), cabled as 8 parallel links
-    // rather than one fat 3200Gbps link (see header).
+    // 4 x 400Gbps = 1600Gbps (4 ports on each side), cabled as 4 parallel links
+    // rather than one fat 1600Gbps link (see header).
     for l in (0, 7) {
         for p in (0, 3) {
-            for c in (0, 7) {
+            for c in (0, 3) {
                 link leaf{l} spine{p} bandwidth=400[Gbps] latency=700[ns];
             }
         }
