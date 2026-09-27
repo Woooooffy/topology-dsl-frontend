@@ -1,9 +1,9 @@
-// VARIANT 2 -- 2 GPUs per host, ONE shared NIC, PCIe-attached (no intra-host NVSwitch).
+// VARIANT 2 -- 2 GPUs per host, ONE shared NIC, PCIe-attached, NVLink-bridged (no NVSwitch).
 // 4 hosts x 2 GPUs = 8 GPUs, 4 PCIe root complexes, 2 leaf switches, 2 spine switches.
 //
-// HOST INTERIOR -- this is a plain PCIe box, not an HGX baseboard:
+// HOST INTERIOR -- a PCIe box whose two GPUs are NVLink-bridged, not an HGX baseboard:
 //
-//         gpu0 ======= NVLink bridge (56 GBps) ======= gpu1
+//         gpu0 ====== NVLink bridge (900 GBps) ====== gpu1
 //           \                                          /
 //       PCIe x16                                  PCIe x16
 //       200Gbps                                    200Gbps
@@ -29,14 +29,14 @@
 //   reads as a mistake, hence the alias. See NODE_TYPE_ALIASES in transformer.py.
 //
 // NUMBERS, per direction (TE-CCL's `bandwidth` is per-direction; a `link` grants it both
-// ways), all of them ordinary cheap-lab parts:
-//   NVLink bridge  56[GBps]  -- an RTX A6000-class bridge is 112 GB/s BIDIRECTIONAL,
-//                              i.e. 56 GB/s each way. An A100/H100 PCIe bridge is ~10x
-//                              this; the conclusions below do not depend on which, since
-//                              either is far above the NIC.
+// ways):
+//   NVLink         900[GBps] -- the same NVLink-class number as every mini topology with an
+//                              intra-host GPU link (see mini_2gpu_2nic.topo), so the set
+//                              differs only in where the NIC hangs, not in NVLink speed.
+//                              It is far above the NIC either way.
 //   PCIe Gen4 x16  200[Gbps] -- ~25 GB/s of the 31.5 GB/s line rate, full duplex.
 //   NIC            100[Gbps] -- 12.5 GB/s, ONE port shared by both GPUs.
-// The hierarchy NVLink (56) >> PCIe (25) >> NIC (12.5) GB/s is what makes the host behave
+// The hierarchy NVLink (900) >> PCIe (25) >> NIC (12.5) GB/s is what makes the host behave
 // as a single 100Gbps endpoint with a nearly free interior.
 //
 // FABRIC -- identical to mini_1gpu_1nic.topo, bit for bit, so the two are a controlled
@@ -72,7 +72,7 @@ module host() {
         link gpu{g} rc bandwidth=200[Gbps] latency=700[ns];
     }
     // Direct peer-to-peer bridge, parallel to the PCIe path through rc.
-    link gpu0 gpu1 bandwidth=56[GBps] latency=700[ns];
+    link gpu0 gpu1 bandwidth=900[GBps] latency=700[ns];
 }
 
 module main() {
